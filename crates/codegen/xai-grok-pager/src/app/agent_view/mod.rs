@@ -115,8 +115,8 @@ use crate::scrollback::ScrollbackSearchState;
 use crate::scrollback::state::ScrollbackState;
 use crate::scrollback::text_selection::{
     ActiveBlockDrag, ActiveTextDrag, DragAutoScrollState, PendingBlockDrag, PendingTextDrag,
-    PersistentTextSelection, ResolvedSelectionBoundaries, ResolvedSelectionModel,
-    TableSelectionGeometry,
+    PendingWordExtendDrag, PersistentTextSelection, ResolvedSelectionBoundaries,
+    ResolvedSelectionModel, TableSelectionGeometry,
 };
 use crate::theme::Theme;
 pub use crate::views::agent::{ActivePane, AgentViewLayout, InputMode, PaneAreas};
@@ -424,6 +424,11 @@ pub struct TextClickState {
 }
 /// Maximum time (ms) between consecutive clicks to count as a multi-click.
 pub(crate) const MULTI_CLICK_TIMEOUT_MS: u128 = 300;
+/// Maximum time (ms) after a double-click word selection during which a press
+/// on that word arms the double-click + drag word-extension gesture. Deliberately
+/// well over [`MULTI_CLICK_TIMEOUT_MS`]: the press that starts the drag is a
+/// separate gesture from the double-click itself.
+pub(super) const WORD_EXTEND_PRESS_WINDOW_MS: u128 = 1500;
 /// Minimum interval (ms) between clipboard toasts for rapid word/line
 /// selections. Drag completions always show the toast regardless.
 const CLIPBOARD_TOAST_DEBOUNCE_MS: u128 = 500;
@@ -969,6 +974,8 @@ pub struct AgentView {
     pub hovered_entry: Option<usize>,
     /// Pending markdown text drag before the pointer crosses the drag threshold.
     pub pending_text_drag: Option<PendingTextDrag>,
+    /// Pending double-click word-extension drag (see [`PendingWordExtendDrag`]).
+    pub pending_word_extend: Option<PendingWordExtendDrag>,
     /// Active markdown text drag selection.
     pub drag_selection: Option<ActiveTextDrag>,
     /// Pending whole-block drag before the pointer crosses the drag threshold.

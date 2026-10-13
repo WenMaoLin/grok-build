@@ -2,17 +2,19 @@
 
 use super::{
     AgentPane, AgentView, DEFAULT_SELECTION_HIGHLIGHT_DURATION_MS, MULTI_CLICK_TIMEOUT_MS,
+    WORD_EXTEND_PRESS_WINDOW_MS,
 };
 use crate::app::app_view::InputOutcome;
 use crate::scrollback::table_geometry::{CellRef, TableGeometry};
 use crate::scrollback::text_selection::{
     ActiveBlockDrag, ActiveTextDrag, AutoScrollDirection, DragAutoScrollState, PendingBlockDrag,
-    PendingTextDrag, PersistentTextSelection, RangeHit, ResolvedSelectionModel, SelectionEndpoint,
-    SelectionKind, SelectionOrigin, TableSelectionGeometry, apply_selection_boundary,
-    block_drag_threshold_exceeded, compute_autoscroll, configured_word_separators,
-    drag_threshold_exceeded, reconstruct_full_selection_text,
-    reconstruct_full_selection_text_with_boundaries, reconstruct_selection_text,
-    reconstruct_selection_text_with_boundaries, reconstruct_table_selection_text_with_meta,
+    PendingTextDrag, PendingWordExtendDrag, PersistentTextSelection, RangeHit,
+    ResolvedSelectionModel, SelectionEndpoint, SelectionKind, SelectionOrigin,
+    TableSelectionGeometry, apply_selection_boundary, block_drag_threshold_exceeded,
+    compute_autoscroll, configured_word_separators, drag_threshold_exceeded,
+    reconstruct_full_selection_text, reconstruct_full_selection_text_with_boundaries,
+    reconstruct_selection_text, reconstruct_selection_text_with_boundaries,
+    reconstruct_table_selection_text_with_meta,
     resolve_table_drag_kind, semantic_selection_at,
 };
 use crate::views::btw_overlay::BTW_OVERLAY_ENTRY_IDX;
@@ -388,6 +390,7 @@ impl AgentView {
         self.left_mouse_down
             || self.scrollbar_dragging
             || self.pending_text_drag.is_some()
+            || self.pending_word_extend.is_some()
             || self.drag_selection.is_some()
             || self.pending_block_drag.is_some()
             || self.block_drag_selection.is_some()
@@ -399,6 +402,7 @@ impl AgentView {
         self.left_mouse_down = false;
         self.scrollbar_dragging = false;
         self.pending_text_drag = None;
+        self.pending_word_extend = None;
         self.drag_selection = None;
         self.pending_block_drag = None;
         self.block_drag_selection = None;
@@ -423,6 +427,7 @@ impl AgentView {
             self.finish_block_drag();
         }
         self.pending_text_drag = None;
+        self.pending_word_extend = None;
         self.pending_block_drag = None;
         self.drag_autoscroll = None;
         self.last_drag_mouse = None;
@@ -504,6 +509,106 @@ impl AgentView {
             anchor_content_width,
         });
         self.drag_selection = None;
+        true
+    }
+
+    /// Arm double-click + drag word extension for a press on a recent
+    /// double-click word selection. `sel` must be the word selection captured
+    /// BEFORE the press cleared it; returns false (leaving normal press
+    /// handling in charge) when it is not a fresh double-click word, when the
+    /// press misses selectable text, or when the press lands outside the word.
+    ///
+    /// The drag is NOT armed until the pointer crosses the drag threshold:
+    /// a press-release without motion falls through to click processing, so
+    /// triple-click line select still works after a double-click.
+    pub(in crate::app) fn begin_word_extend_drag(
+        &mut self,
+        mouse: &MouseEvent,
+        now: Instant,
+        sel: &PersistentTextSelection,
+    ) -> bool {
+        if sel.origin != SelectionOrigin::DoubleClick {
+            return false;
+        }
+        if self.selection_created_at.is_none_or(|t| {
+            now.duration_since(t).as_millis() >= WORD_EXTEND_PRESS_WINDOW_MS
+        }) {
+            return false;
+        }
+        let Some(hit) = self
+            .last_scrollback_selection_model
+            .hit_test_selectable_range(mouse.column, mouse.row)
+        else {
+            return false;
+        };
+        if hit.entry_idx != sel.entry_idx || hit.range_id != sel.range_id {
+            return false;
+        }
+        let press = SelectionEndpoint {
+            block_line_idx: hit.block_line_idx,
+            col_within_range: hit.col_within_range,
+        };
+        // The press must land on the word itself; presses outside it start a
+        // fresh selection (standard terminal behavior).
+        let within_word = (press.block_line_idx, press.col_within_range)
+            >= (sel.anchor.block_line_idx, sel.anchor.col_within_range)
+            && (press.block_line_idx, press.col_within_range)
+                <= (sel.head.block_line_idx, sel.head.col_within_range);
+        if !within_word {
+            return false;
+        }
+        self.pending_word_extend = Some(PendingWordExtendDrag {
+            entry_idx: sel.entry_idx,
+            range_id: sel.range_id,
+            word_anchor: sel.anchor,
+            word_head: sel.head,
+            start_col: mouse.column,
+            start_row: mouse.row,
+            anchor_content_width: self
+                .last_scrollback_selection_model
+                .visible_block_content_width(sel.entry_idx),
+        });
+        self.drag_selection = None;
+        true
+    }
+
+    /// Promote a pending word-extension drag once the pointer crosses the
+    /// drag threshold: the active drag anchors at the word boundary on the
+    /// far side of the drag direction, keeping the double-clicked word
+    /// selected while it extends.
+    fn update_word_extend_drag(&mut self, mouse: &MouseEvent) -> bool {
+        let Some(pending) = self.pending_word_extend else {
+            return false;
+        };
+        let dx = pending.start_col.abs_diff(mouse.column);
+        let dy = pending.start_row.abs_diff(mouse.row);
+        if dx < 1 && dy < 1 {
+            return false;
+        }
+        let word_anchor_hit = RangeHit {
+            entry_idx: pending.entry_idx,
+            range_id: pending.range_id,
+            block_line_idx: pending.word_anchor.block_line_idx,
+            col_within_range: pending.word_anchor.col_within_range,
+        };
+        let model = self.selection_model_for_hit(&word_anchor_hit);
+        let head = model
+            .hit_test_nearest_in_range(word_anchor_hit, mouse.column, mouse.row)
+            .unwrap_or(word_anchor_hit);
+        let moving_right = (mouse.column, mouse.row) >= (pending.start_col, pending.start_row);
+        let anchor_endpoint = if moving_right {
+            pending.word_anchor
+        } else {
+            pending.word_head
+        };
+        let anchor = RangeHit {
+            entry_idx: pending.entry_idx,
+            range_id: pending.range_id,
+            block_line_idx: anchor_endpoint.block_line_idx,
+            col_within_range: anchor_endpoint.col_within_range,
+        };
+        self.pending_word_extend = None;
+        self.arm_text_drag(mouse, anchor, head, pending.anchor_content_width);
         true
     }
 
@@ -677,6 +782,13 @@ impl AgentView {
         }
         if self.pending_text_drag.is_some() {
             return if self.update_text_drag(mouse) {
+                InputOutcome::Changed
+            } else {
+                InputOutcome::Unchanged
+            };
+        }
+        if self.pending_word_extend.is_some() {
+            return if self.update_word_extend_drag(mouse) {
                 InputOutcome::Changed
             } else {
                 InputOutcome::Unchanged
@@ -1555,7 +1667,7 @@ mod tests {
     use crate::app::agent_view::test_fixtures::make_agent;
     use crate::scrollback::table_geometry::CellRef;
     use crate::scrollback::text_selection::{ResolvedSelectableLine, VisibleBlockGeometry};
-    use crossterm::event::{Event, MouseButton, MouseEventKind};
+    use crossterm::event::{Event, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
     use ratatui::layout::Rect;
 
     const TABLE: &[&str] = &[
@@ -1570,8 +1682,38 @@ mod tests {
         TableGeometry::detect(|i| TABLE.get(i).map(|s| s.to_string()), 1).expect("grid detected")
     }
 
-    /// Agent whose TABLE lines are in the visible model but with no `visible_blocks`/scrollback entry.
-    /// This forces the table copy to fall through to the visible-model linear reconstruction.
+    /// Agent with a single selectable line `text` in the visible model
+    /// (screen row 0, columns 0..len).
+    fn agent_with_selectable_line(text: &str) -> AgentView {
+        let mut agent = make_agent();
+        let mut model = ResolvedSelectionModel::default();
+        model.push_line(ResolvedSelectableLine {
+            entry_idx: 0,
+            range_id: 0,
+            block_line_idx: 0,
+            screen_y: 0,
+            screen_x: 0,
+            selectable_cols: 0..text.len() as u16,
+            text: text.to_string(),
+            painted_region: None,
+            joiner_to_previous: None,
+        });
+        agent.update_scrollback_selection_state(model, Default::default());
+        agent
+    }
+
+    fn mouse(kind: MouseEventKind, col: u16, row: u16) -> MouseEvent {
+        MouseEvent {
+            kind,
+            column: col,
+            row,
+            modifiers: KeyModifiers::NONE,
+        }
+    }
+
+    /// Agent whose TABLE lines are in the visible model but with no
+    /// `visible_blocks`/scrollback entry, forcing the table copy to fall
+    /// through to the visible-model linear reconstruction.
     fn agent_with_visible_table_lines_only() -> AgentView {
         let mut agent = make_agent();
         let mut model = ResolvedSelectionModel::default();
@@ -1838,6 +1980,185 @@ mod tests {
     }
 
     #[test]
+    fn word_extend_drag_extends_right_keeping_word_start() {
+        let mut agent = agent_with_selectable_line("hello world foo bar");
+        // Double-click "world" (cols 6..11).
+        agent.select_word_at(&RangeHit {
+            entry_idx: 0,
+            range_id: 0,
+            block_line_idx: 0,
+            col_within_range: 6,
+        });
+        let sel = agent.persistent_text_selection.expect("word selected");
+        assert_eq!(sel.origin, SelectionOrigin::DoubleClick);
+        // Press on the word, then drag right past it: the anchor stays at the
+        // word start and the head follows the pointer.
+        assert!(agent.begin_word_extend_drag(
+            &mouse(MouseEventKind::Down(MouseButton::Left), 8, 0),
+            Instant::now(),
+            &sel,
+        ));
+        assert!(agent.pending_word_extend.is_some());
+        assert!(agent.update_word_extend_drag(&mouse(
+            MouseEventKind::Drag(MouseButton::Left),
+            15,
+            0,
+        )));
+        assert_eq!(
+            agent.drag_selection.map(|d| (d.anchor, d.head)),
+            Some((
+                RangeHit {
+                    entry_idx: 0,
+                    range_id: 0,
+                    block_line_idx: 0,
+                    col_within_range: 6,
+                },
+                RangeHit {
+                    entry_idx: 0,
+                    range_id: 0,
+                    block_line_idx: 0,
+                    col_within_range: 15,
+                },
+            ))
+        );
+        assert!(agent.pending_word_extend.is_none());
+    }
+
+    #[test]
+    fn word_extend_drag_extends_left_keeping_word_end() {
+        let mut agent = agent_with_selectable_line("hello world foo bar");
+        agent.select_word_at(&RangeHit {
+            entry_idx: 0,
+            range_id: 0,
+            block_line_idx: 0,
+            col_within_range: 6,
+        });
+        let sel = agent.persistent_text_selection.expect("word selected");
+        assert!(agent.begin_word_extend_drag(
+            &mouse(MouseEventKind::Down(MouseButton::Left), 8, 0),
+            Instant::now(),
+            &sel,
+        ));
+        assert!(agent.update_word_extend_drag(&mouse(
+            MouseEventKind::Drag(MouseButton::Left),
+            3,
+            0,
+        )));
+        assert_eq!(
+            agent.drag_selection.map(|d| (d.anchor, d.head)),
+            Some((
+                RangeHit {
+                    entry_idx: 0,
+                    range_id: 0,
+                    block_line_idx: 0,
+                    col_within_range: 10,
+                },
+                RangeHit {
+                    entry_idx: 0,
+                    range_id: 0,
+                    block_line_idx: 0,
+                    col_within_range: 3,
+                },
+            ))
+        );
+    }
+
+    #[test]
+    fn word_extend_drag_rejects_press_outside_word() {
+        let mut agent = agent_with_selectable_line("hello world foo bar");
+        agent.select_word_at(&RangeHit {
+            entry_idx: 0,
+            range_id: 0,
+            block_line_idx: 0,
+            col_within_range: 6,
+        });
+        let sel = agent.persistent_text_selection.expect("word selected");
+        // Press on a different word: normal drag path stays in charge.
+        assert!(!agent.begin_word_extend_drag(
+            &mouse(MouseEventKind::Down(MouseButton::Left), 2, 0),
+            Instant::now(),
+            &sel,
+        ));
+        assert!(agent.pending_word_extend.is_none());
+        // Press on the word's first column is still inside the word.
+        assert!(agent.begin_word_extend_drag(
+            &mouse(MouseEventKind::Down(MouseButton::Left), 6, 0),
+            Instant::now(),
+            &sel,
+        ));
+    }
+
+    #[test]
+    fn word_extend_drag_expires_after_press_window() {
+        let mut agent = agent_with_selectable_line("hello world foo bar");
+        agent.select_word_at(&RangeHit {
+            entry_idx: 0,
+            range_id: 0,
+            block_line_idx: 0,
+            col_within_range: 6,
+        });
+        let sel = agent.persistent_text_selection.expect("word selected");
+        let stale = Instant::now() + Duration::from_secs(10);
+        assert!(!agent.begin_word_extend_drag(
+            &mouse(MouseEventKind::Down(MouseButton::Left), 8, 0),
+            stale,
+            &sel,
+        ));
+        assert!(agent.pending_word_extend.is_none());
+    }
+
+    #[test]
+    fn word_extend_drag_requires_double_click_origin() {
+        let mut agent = agent_with_selectable_line("hello world foo bar");
+        let drag_origin_sel = PersistentTextSelection {
+            entry_idx: 0,
+            range_id: 0,
+            anchor: SelectionEndpoint {
+                block_line_idx: 0,
+                col_within_range: 6,
+            },
+            head: SelectionEndpoint {
+                block_line_idx: 0,
+                col_within_range: 11,
+            },
+            origin: SelectionOrigin::Drag,
+            kind: SelectionKind::Linear,
+        };
+        assert!(!agent.begin_word_extend_drag(
+            &mouse(MouseEventKind::Down(MouseButton::Left), 8, 0),
+            Instant::now(),
+            &drag_origin_sel,
+        ));
+    }
+
+    #[test]
+    fn word_extend_drag_without_motion_stays_pending() {
+        let mut agent = agent_with_selectable_line("hello world foo bar");
+        agent.select_word_at(&RangeHit {
+            entry_idx: 0,
+            range_id: 0,
+            block_line_idx: 0,
+            col_within_range: 6,
+        });
+        let sel = agent.persistent_text_selection.expect("word selected");
+        assert!(agent.begin_word_extend_drag(
+            &mouse(MouseEventKind::Down(MouseButton::Left), 8, 0),
+            Instant::now(),
+            &sel,
+        ));
+        // Same-position drag never crosses the threshold: no drag armed, the
+        // pending latch stays for the Up path's click processing (a third
+        // click line-selects).
+        assert!(!agent.update_word_extend_drag(&mouse(
+            MouseEventKind::Drag(MouseButton::Left),
+            8,
+            0,
+        )));
+        assert!(agent.pending_word_extend.is_some());
+        assert!(agent.drag_selection.is_none());
+    }
+
+    #[test]
     fn installed_scrollback_companion_reaches_linear_and_full_line_copy() {
         use crate::scrollback::block::RenderBlock;
         use crate::scrollback::render::ScratchBuffer;
@@ -1964,13 +2285,23 @@ mod tests {
             &child.scrollback,
             &mut scratch,
         );
+        let expected_rel = child_cwd
+            .join("src/lib.rs")
+            .strip_prefix(&child_cwd)
+            .expect("child path under cwd")
+            .to_string_lossy()
+            .into_owned();
+        // The POSIX-style test paths keep '/' in the cwd while joined
+        // components use the platform separator, so normalize both sides to
+        // '/' before comparing (the assertion is about relativity, not
+        // separator style).
         let line = rendered
             .output
             .selection_model
             .ranges
             .iter()
             .flat_map(|range| &range.lines)
-            .find(|line| line.text == "src/lib.rs")
+            .find(|line| line.text.replace('\\', "/") == expected_rel)
             .expect("child-relative Read header")
             .clone();
         let content_width = rendered
@@ -1997,7 +2328,10 @@ mod tests {
                 |source| source(line.block_line_idx),
             )
             .flatten();
-        assert_eq!(source_text.as_deref(), Some("src/lib.rs"));
+        assert_eq!(
+            source_text.as_deref().map(|s| s.replace('\\', "/")),
+            Some("src/lib.rs".to_string())
+        );
         {
             let child = parent.subagent_views.get(&child_id).expect("active child");
             let entry = child.scrollback.get(0).expect("child Read entry");
@@ -2008,7 +2342,8 @@ mod tests {
                         .lines
                         .get(line.block_line_idx)
                         .unwrap_or_else(|| panic!("missing index"))
-                ),
+                )
+                .replace('\\', "/"),
                 "src/lib.rs",
                 "copy helper must not rebuild the child cache against parent cwd"
             );
@@ -2035,7 +2370,9 @@ mod tests {
             anchor_content_width: Some(content_width),
         };
         assert_eq!(
-            parent.reconstruct_drag_copy(&drag),
+            parent
+                .reconstruct_drag_copy(&drag)
+                .map(|(text, kind)| (text.replace('\\', "/"), kind)),
             Some(("src/lib.rs".to_string(), SelectionKind::Linear))
         );
     }

@@ -703,15 +703,31 @@ impl AgentView {
                             self.handle_block_viewer_mouse(mouse);
                             return InputOutcome::Changed;
                         }
-                        self.persistent_text_selection = None;
-                        self.table_selection_geometry = None;
-                        self.selection_created_at = None;
                         if is_link_modifier_held(mouse.modifiers)
                             && self.try_arm_link_click(mouse.column, mouse.row)
                         {
                             self.pending_scrollback_click = None;
                             return InputOutcome::Changed;
                         }
+                        // Double-click + drag: arm word extension while the
+                        // word selection and its creation timestamp are still
+                        // intact. Rejected presses fall through and clear.
+                        let word_selection = self.persistent_text_selection;
+                        if let Some(sel) = word_selection
+                            && self.begin_word_extend_drag(mouse, Instant::now(), &sel)
+                        {
+                            // A press-release without motion still counts as a
+                            // click (triple-click line-selects), so arm the
+                            // click latch like the normal press path does.
+                            self.pending_link_click = None;
+                            self.last_question_click = None;
+                            self.last_permission_click = None;
+                            self.pending_scrollback_click = Some((mouse.column, mouse.row));
+                            return InputOutcome::Changed;
+                        }
+                        self.persistent_text_selection = None;
+                        self.table_selection_geometry = None;
+                        self.selection_created_at = None;
                         self.pending_link_click = None;
                         self.last_question_click = None;
                         self.last_permission_click = None;
@@ -795,6 +811,9 @@ impl AgentView {
                     };
                 }
                 let had_pending_text_drag = self.pending_text_drag.take().is_some();
+                // An armed-but-unpromoted word extension is just a press: fall
+                // through to click processing (e.g. a third click line-selects).
+                let _had_pending_word_extend = self.pending_word_extend.take().is_some();
                 let _had_pending_block_drag = self.pending_block_drag.take().is_some();
                 if let Some((lc, lr, target)) = self.pending_link_click.take()
                     && mouse.column == lc

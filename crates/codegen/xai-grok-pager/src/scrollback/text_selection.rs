@@ -215,6 +215,23 @@ pub struct PendingTextDrag {
     pub anchor_content_width: Option<u16>,
 }
 
+/// A press on a recent double-click word selection, waiting for the drag
+/// threshold: promotes into an [`ActiveTextDrag`] anchored at the word
+/// boundary on the far side of the drag direction, so double-click + drag
+/// extends the word instead of starting a fresh selection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PendingWordExtendDrag {
+    pub entry_idx: usize,
+    pub range_id: u16,
+    /// Word start (`anchor` of the double-click selection).
+    pub word_anchor: SelectionEndpoint,
+    /// Word end (`head` of the double-click selection).
+    pub word_head: SelectionEndpoint,
+    pub start_col: u16,
+    pub start_row: u16,
+    pub anchor_content_width: Option<u16>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ActiveTextDrag {
     pub anchor: RangeHit,
@@ -1146,7 +1163,10 @@ fn rect_contains(rect: Rect, col: u16, row: u16) -> bool {
 
 // Word / URL boundary detection (for double-click selection)
 
-/// All printable ASCII punctuation except underscore, matching tmux's `word-separators` default from `options-table.c`.
+/// All printable ASCII punctuation except underscore, matching tmux's
+/// `word-separators` default from `options-table.c`. Under the
+/// input-box word definition, this list is a set of *extra*
+/// separators; every non-alphanumeric character breaks words anyway.
 pub const DEFAULT_WORD_SEPARATORS: &str = "!\"#$%&'()*+,-./:;<=>?@[\\]^`{|}~";
 
 /// Load `[ui] word_separators` from config, falling back to [`DEFAULT_WORD_SEPARATORS`].
@@ -1176,8 +1196,19 @@ enum CharClass {
 fn classify_grapheme(grapheme: &str, separators: &str) -> CharClass {
     match grapheme.chars().next() {
         Some(c) if c.is_whitespace() => CharClass::Whitespace,
+        // Explicit config wins (a user may configure '_' or other chars).
         Some(c) if separators.contains(c) => CharClass::Separator,
-        _ => CharClass::Word,
+        // Word chars match the input box's double-click definition
+        // (xai-ratatui-textarea's `char_class`): Unicode letters and
+        // digits (CJK included) plus '_'. Everything else — non-ASCII
+        // punctuation AND symbols (emoji, arrows, ©, →) — breaks words,
+        // so a double-click in mixed prose selects exactly one word,
+        // the same way the composer does. Non-ASCII punctuation (CJK/
+        // fullwidth 《》「」“”？。，、…) also falls here: without this
+        // rule a double-click inside Chinese text selects a whole
+        // clause glued together by fullwidth punctuation.
+        Some(c) if c.is_alphanumeric() || c == '_' => CharClass::Word,
+        _ => CharClass::Separator,
     }
 }
 
@@ -1215,23 +1246,30 @@ pub fn word_boundaries_at_col(text: &str, col: u16, separators: &str) -> Range<u
         return 0..0;
     };
 
+    // Separator-class graphemes never group: each is its
+    // own word, so a double-click on one of 《),》 selects
+    // exactly that character, matching the input box.
     let mut left = target_idx;
-    while left > 0
-        && left
-            .checked_sub(1)
-            .and_then(|j| segments.get(j))
-            .is_some_and(|seg| seg.2 == target_class)
-    {
-        left -= 1;
+    if target_class != CharClass::Separator {
+        while left > 0
+            && left
+                .checked_sub(1)
+                .and_then(|j| segments.get(j))
+                .is_some_and(|seg| seg.2 == target_class)
+        {
+            left -= 1;
+        }
     }
 
     let mut right = target_idx;
-    while right + 1 < segments.len()
-        && segments
-            .get(right + 1)
-            .is_some_and(|seg| seg.2 == target_class)
-    {
-        right += 1;
+    if target_class != CharClass::Separator {
+        while right + 1 < segments.len()
+            && segments
+                .get(right + 1)
+                .is_some_and(|seg| seg.2 == target_class)
+        {
+            right += 1;
+        }
     }
 
     match (segments.get(left), segments.get(right)) {
@@ -2416,10 +2454,13 @@ mod tests {
 
     #[test]
     fn word_boundaries_punctuation_run() {
-        // "a---b" segments as Word(0..1), Separator(1..4), Word(4..5)
+        // "a---b" → Word(0..1), Sep(1..2), Sep(2..3),
+        // Sep(3..4), Word(4..5). Each separator is its
+        // own word — a double-click selects a single "-".
         assert_eq!(wb("a---b", 0), 0..1);
-        assert_eq!(wb("a---b", 1), 1..4);
-        assert_eq!(wb("a---b", 3), 1..4);
+        assert_eq!(wb("a---b", 1), 1..2);
+        assert_eq!(wb("a---b", 2), 2..3);
+        assert_eq!(wb("a---b", 3), 3..4);
         assert_eq!(wb("a---b", 4), 4..5);
     }
 
@@ -2462,8 +2503,9 @@ mod tests {
 
     #[test]
     fn word_boundaries_wide_char_cjk() {
-        // CJK characters are not in DEFAULT_WORD_SEPARATORS and not whitespace, so they are Word class (matching tmux)
-        // Each occupies 2 display cols, so "a\u{754c}b" is all Word class, giving 0..4
+        // CJK characters are alphanumeric, so they are Word class.
+        // Each occupies 2 display cols.
+        // "a界b" → all Word class → 0..4
         assert_eq!(wb("a\u{754c}b", 0), 0..4);
         assert_eq!(wb("a\u{754c}b", 1), 0..4); // first col of wide char
         assert_eq!(wb("a\u{754c}b", 2), 0..4); // second col of wide char
@@ -2493,10 +2535,11 @@ mod tests {
     }
 
     #[test]
-    fn word_boundaries_mixed_separators_same_class_grouped() {
-        // Both chars of "-=" are Separator, grouped as consecutive same-class
-        assert_eq!(wb("-=", 0), 0..2);
-        assert_eq!(wb("-=", 1), 0..2);
+    fn word_boundaries_mixed_separators_stay_single() {
+        // "-=" → both Separator, but each is its own
+        // word: a double-click selects a single character.
+        assert_eq!(wb("-=", 0), 0..1);
+        assert_eq!(wb("-=", 1), 1..2);
     }
 
     #[test]
@@ -2510,8 +2553,9 @@ mod tests {
 
     #[test]
     fn word_boundaries_non_ascii_letters_are_word_chars() {
-        // Non-ASCII letters group with adjacent ASCII word chars, matching tmux behaviour where only ASCII punctuation is a separator
-        // "caf\u{e9}" is all Word class, giving 0..4
+        // Non-ASCII letters are alphanumeric, so they group with
+        // adjacent ASCII word chars.
+        // "caf\u{e9}" → all Word class → 0..4
         assert_eq!(wb("caf\u{e9}", 0), 0..4);
         assert_eq!(wb("caf\u{e9}", 3), 0..4);
     }
@@ -2562,25 +2606,74 @@ mod tests {
     }
 
     #[test]
+    fn word_boundaries_fullwidth_punctuation_breaks_words() {
+        // Fullwidth punctuation is not in DEFAULT_WORD_SEPARATORS, but must
+        // still break double-click words, or Chinese text glues into clauses.
+        // "《你好吗？》" → Sep(0..2) Word(2..8) Sep(8..10) Sep(10..12)
+        let text = "\u{300a}\u{4f60}\u{597d}\u{5417}\u{ff1f}\u{300b}";
+        assert_eq!(wb(text, 0), 0..2, "《 is its own group");
+        assert_eq!(wb(text, 1), 0..2, "second col of 《");
+        assert_eq!(wb(text, 2), 2..8, "你好吗 selects as one word");
+        assert_eq!(wb(text, 7), 2..8);
+        // ？ and 》 are each a single-character word.
+        assert_eq!(wb(text, 8), 8..10, "？ selects alone");
+        assert_eq!(wb(text, 10), 10..12, "》 selects alone");
+    }
+
+    #[test]
+    fn word_boundaries_ideographic_comma_and_period() {
+        // "你好，世界" → Word(0..4) Sep(4..6) Word(6..10)
+        let text = "\u{4f60}\u{597d}\u{ff0c}\u{4e16}\u{754c}";
+        assert_eq!(wb(text, 0), 0..4);
+        assert_eq!(wb(text, 5), 4..6, "， is its own group");
+        assert_eq!(wb(text, 7), 6..10, "世界 selects as one word");
+    }
+
+    #[test]
+    fn word_boundaries_cjk_bracket_breaks_ascii_run() {
+        // "pre《fix" → Word(0..3) Sep(3..5) Word(5..8): 《 must not glue
+        // the surrounding ASCII words together.
+        let text = "pre\u{300a}fix";
+        assert_eq!(wb(text, 1), 0..3);
+        assert_eq!(wb(text, 4), 3..5);
+        assert_eq!(wb(text, 6), 5..8);
+    }
+
+    #[test]
+    fn word_boundaries_symbols_break_words() {
+        // Symbols (So) are not alphanumeric, so they break words —
+        // matching the input box's double-click definition
+        // (xai-ratatui-textarea's char_class treats emoji as
+        // punctuation-class). "a😀b" → Word(0..1), Separator(1..3),
+        // Word(3..4); the emoji is 2 display columns wide.
+        assert_eq!(wb("a\u{1f600}b", 0), 0..1);
+        assert_eq!(wb("a\u{1f600}b", 2), 1..3);
+        assert_eq!(wb("a\u{1f600}b", 3), 3..4);
+    }
+
+    #[test]
     fn word_boundaries_custom_separators_empty() {
-        // With an empty separators string only whitespace breaks words
-        // "hello-world" with no separators is all Word, giving 0..11
-        assert_eq!(word_boundaries_at_col("hello-world", 0, ""), 0..11);
-        assert_eq!(word_boundaries_at_col("hello-world", 5, ""), 0..11);
-        assert_eq!(word_boundaries_at_col("hello-world", 6, ""), 0..11);
-        // "a.b@c" is all Word, giving 0..5
-        assert_eq!(word_boundaries_at_col("a.b@c", 2, ""), 0..5);
+        // Empty separators string → every non-alphanumeric char
+        // still breaks words (input-box semantics).
+        // "hello-world" → Word(0..5), Separator(5..6), Word(6..11)
+        assert_eq!(word_boundaries_at_col("hello-world", 0, ""), 0..5);
+        assert_eq!(word_boundaries_at_col("hello-world", 5, ""), 5..6);
+        assert_eq!(word_boundaries_at_col("hello-world", 6, ""), 6..11);
+        // "a.b@c" → a(0..1) .(1..2) b(2..3) @(3..4) c(4..5)
+        assert_eq!(word_boundaries_at_col("a.b@c", 2, ""), 2..3);
     }
 
     #[test]
     fn word_boundaries_custom_separators_subset() {
-        // Only "." and "/" are separators; hyphen and @ are word chars
+        // "." and "/" are extra configured separators; every other
+        // non-alphanumeric char ("-", "@") is still a separator
+        // under input-box semantics.
         let seps = "./";
-        assert_eq!(word_boundaries_at_col("hello-world", 0, seps), 0..11);
+        assert_eq!(word_boundaries_at_col("hello-world", 0, seps), 0..5);
         assert_eq!(word_boundaries_at_col("hello.world", 0, seps), 0..5);
         assert_eq!(word_boundaries_at_col("hello.world", 5, seps), 5..6);
         assert_eq!(word_boundaries_at_col("a/b", 0, seps), 0..1);
-        assert_eq!(word_boundaries_at_col("user@host", 0, seps), 0..9);
+        assert_eq!(word_boundaries_at_col("user@host", 0, seps), 0..4);
     }
 
     #[test]
@@ -2921,25 +3014,15 @@ mod tests {
     }
 
     #[test]
-    fn semantic_selection_custom_separators_across_wrap() {
+    fn semantic_selection_symbol_separates_across_wrap() {
         let model = wrap_model(&[("hello-", None), ("world", Some(""))]);
-        let grouped = semantic_selection_at(&model, &wrap_hit(0, 1), "").expect("grouped");
+        // "-" is non-alphanumeric, so it breaks the word even with
+        // empty separators (input-box semantics): the two wrapped
+        // halves are selected separately.
+        let hello = semantic_selection_at(&model, &wrap_hit(0, 1), "")
+            .expect("hello side");
         assert_eq!(
-            grouped,
-            SemanticSelection {
-                anchor: ep(0, 0),
-                head: ep(1, 4),
-                text: "hello-world".to_string(),
-            }
-        );
-        assert_eq!(
-            semantic_selection_at(&model, &wrap_hit(1, 0), "").expect("grouped from row 1"),
-            grouped
-        );
-
-        let split = semantic_selection_at(&model, &wrap_hit(0, 1), "-").expect("split");
-        assert_eq!(
-            split,
+            hello,
             SemanticSelection {
                 anchor: ep(0, 0),
                 head: ep(0, 4),
@@ -2947,7 +3030,21 @@ mod tests {
             }
         );
         assert_eq!(
-            semantic_selection_at(&model, &wrap_hit(1, 2), "-").expect("world side"),
+            semantic_selection_at(&model, &wrap_hit(1, 0), "")
+                .expect("world side"),
+            SemanticSelection {
+                anchor: ep(1, 0),
+                head: ep(1, 4),
+                text: "world".to_string(),
+            }
+        );
+        // Explicitly configuring "-" gives the same split.
+        assert_eq!(
+            semantic_selection_at(&model, &wrap_hit(0, 1), "-").expect("configured"),
+            hello
+        );
+        assert_eq!(
+            semantic_selection_at(&model, &wrap_hit(1, 2), "-").expect("world side configured"),
             SemanticSelection {
                 anchor: ep(1, 0),
                 head: ep(1, 4),

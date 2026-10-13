@@ -205,8 +205,7 @@ fn render_with_highlight(
     buf
 }
 
-fn count_reversed(buf: &Buffer) -> usize {
-    (buf.area.top()..buf.area.bottom())
+fn count_reversed(buf: &Buffer) -> usize {    (buf.area.top()..buf.area.bottom())
         .map(|y| reversed_cols_on_row(buf, y).len())
         .sum()
 }
@@ -3747,4 +3746,60 @@ fn dim_from_entry_stays_visible_on_terminal_theme() {
         "RGB themes keep the gray_dim fg overwrite"
     );
     assert!(!cell.modifier.contains(Modifier::DIM));
+}
+
+/// Real-render regression test for "plain text double-click selects wrong
+/// spans": renders a mixed CJK/English prose paragraph through the production
+/// pipeline and checks semantic word selection at click positions. CJK
+/// ideographs group as one run, fullwidth punctuation breaks it, and a word
+/// split across a soft-wrap boundary is re-joined.
+#[test]
+fn repro_mixed_cjk_prose_word_selection() {
+    use crate::scrollback::text_selection::{
+        RangeHit, SelectionEndpoint, semantic_selection_at,
+    };
+
+    let entry = make_markdown_entry(
+        "这是一个测试段落，包含中文和 English words 混排，用来验证双击选词是否准确。\n\n第二段 content here.",
+    );
+    let viewport = Rect::new(0, 0, 60, 40);
+    let rendered = render_with_selection_boundaries(std::slice::from_ref(&entry), viewport, 0);
+    let model = &rendered.result.selection_model;
+
+    let sel = |bl: usize, col: u16| {
+        semantic_selection_at(
+            model,
+            &RangeHit {
+                entry_idx: 0,
+                range_id: 0,
+                block_line_idx: bl,
+                col_within_range: col,
+            },
+            crate::scrollback::text_selection::DEFAULT_WORD_SEPARATORS,
+        )
+        .expect("semantic range")
+    };
+    let ep = |bl: usize, col: u16| SelectionEndpoint {
+        block_line_idx: bl,
+        col_within_range: col,
+    };
+    let assert_sel = |bl: usize, col: u16, anchor: SelectionEndpoint, head: SelectionEndpoint,
+                      text: &str| {
+        let got = sel(bl, col);
+        assert_eq!(got.anchor, anchor, "anchor for ({bl},{col})");
+        assert_eq!(got.head, head, "head for ({bl},{col})");
+        assert_eq!(got.text, text, "text for ({bl},{col})");
+    };
+
+    // The paragraph wraps as: "…words 混" / "排，用来验证双击选词是否准确。"
+    // (joiner Some("") — split inside the CJK run).
+    // Inside the first CJK run: 这是一个测试段落 (0..16).
+    assert_sel(0, 1, ep(0, 0), ep(0, 15), "这是一个测试段落");
+    assert_sel(0, 9, ep(0, 0), ep(0, 15), "这是一个测试段落");
+    // Double-click on the fullwidth comma selects just the comma.
+    assert_sel(0, 16, ep(0, 16), ep(0, 17), "，");
+    // 排 continues the CJK run split across the wrap: 混+排 are one word.
+    assert_sel(1, 1, ep(0, 43), ep(1, 1), "混排");
+    // Fullwidth comma on the continuation line.
+    assert_sel(1, 3, ep(1, 2), ep(1, 3), "，");
 }

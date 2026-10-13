@@ -233,6 +233,7 @@ impl AgentView {
             pane_areas: PaneAreas::default(),
             hovered_entry: None,
             pending_text_drag: None,
+            pending_word_extend: None,
             drag_selection: None,
             pending_block_drag: None,
             block_drag_selection: None,

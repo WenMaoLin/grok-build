@@ -1565,14 +1565,22 @@ impl TextArea {
         }
 
         // Determine the class of the character at `pos` (or just before if at end).
-        let target_class = if pos < self.text.len() {
-            Self::char_class(self.text_slice(pos..).chars().next().unwrap_or('\0'))
+        let (target_class, char_start) = if pos < self.text.len() {
+            let ch = self.text_slice(pos..).chars().next().unwrap_or('\0');
+            (Self::char_class(ch), pos)
         } else if pos > 0 {
             let ch = self.text_slice(..pos).chars().next_back().unwrap_or('\0');
-            Self::char_class(ch)
+            (Self::char_class(ch), self.text.len() - ch.len_utf8())
         } else {
             return 0;
         };
+
+        // Punctuation-class characters never group: each is its
+        // own word, so a double-click on one of 《),》 selects
+        // exactly that character, not the whole punctuation run.
+        if target_class == 2 {
+            return self.adjust_pos_out_of_elements(char_start, true);
+        }
 
         let before = self.text_slice(..pos);
         let word_start = before
@@ -1597,11 +1605,19 @@ impl TextArea {
         }
 
         // Determine the class of the character at `pos`.
-        let target_class = if pos < self.text.len() {
-            Self::char_class(self.text_slice(pos..).chars().next().unwrap_or('\0'))
+        let (target_class, char_end) = if pos < self.text.len() {
+            let ch = self.text_slice(pos..).chars().next().unwrap_or('\0');
+            (Self::char_class(ch), pos + ch.len_utf8())
         } else {
             return self.text.len();
         };
+
+        // Punctuation-class characters never group (see
+        // `word_start_at`): a double-click selects a single
+        // punctuation character.
+        if target_class == 2 {
+            return self.adjust_pos_out_of_elements(char_end, false);
+        }
 
         let after = self.text_slice(pos..);
         let word_end = after

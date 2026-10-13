@@ -4331,6 +4331,66 @@ fn double_click_selects_word() {
 }
 
 #[test]
+fn double_click_selects_single_punctuation_char() {
+    // Each punctuation character is its own word: a
+    // double-click on one of 《),》 selects only that
+    // character, not the whole punctuation run.
+    let mut ta = ta_with("\u{300a}),\u{300b}");
+    let area = Rect::new(0, 0, 40, 5);
+    let state = TextAreaState::default();
+
+    // Double-click on 《 (cols 0-1)
+    ta.handle_mouse(mouse_down(0, 0), area, state);
+    let action = ta.handle_mouse(mouse_down(0, 0), area, state);
+    assert_eq!(action, MouseAction::SelectionFinished);
+    assert_eq!(
+        ta.selected_text(),
+        Some("\u{300a}".to_string()),
+        "double-click on 《 must select only 《"
+    );
+
+    // Double-click on ) (col 2)
+    ta.handle_mouse(mouse_down(2, 0), area, state);
+    let action = ta.handle_mouse(mouse_down(2, 0), area, state);
+    assert_eq!(action, MouseAction::SelectionFinished);
+    assert_eq!(
+        ta.selected_text(),
+        Some(")".to_string()),
+        "double-click on ) must select only )"
+    );
+}
+
+#[test]
+fn double_click_selects_full_word_between_cjk_punctuation() {
+    // 《hello。world》 — double-clicking "hello" selects the
+    // whole word; the CJK brackets and ideographic period
+    // are their own single-character words.
+    let mut ta = ta_with("\u{300a}hello\u{3002}world\u{300b}");
+    let area = Rect::new(0, 0, 40, 5);
+    let state = TextAreaState::default();
+
+    // Double-click on "hello" (col 3)
+    ta.handle_mouse(mouse_down(3, 0), area, state);
+    let action = ta.handle_mouse(mouse_down(3, 0), area, state);
+    assert_eq!(action, MouseAction::SelectionFinished);
+    assert_eq!(
+        ta.selected_text(),
+        Some("hello".to_string()),
+        "double-click inside hello must select all of hello"
+    );
+
+    // Double-click on 。 (col 7) selects only the period.
+    ta.handle_mouse(mouse_down(7, 0), area, state);
+    let action = ta.handle_mouse(mouse_down(7, 0), area, state);
+    assert_eq!(action, MouseAction::SelectionFinished);
+    assert_eq!(
+        ta.selected_text(),
+        Some("\u{3002}".to_string()),
+        "double-click on 。 must select only 。"
+    );
+}
+
+#[test]
 fn double_click_cursor_on_last_char() {
     // Neovim places cursor on the last character of the selection,
     // not one past the end.
@@ -4408,20 +4468,22 @@ fn double_click_stops_at_punctuation() {
 }
 
 #[test]
-fn double_click_on_punctuation_selects_punctuation_run() {
-    // Double-click on punctuation selects the contiguous punctuation
+fn double_click_on_punctuation_selects_single_char() {
+    // Punctuation never groups: each character is its own
+    // word, so a double-click selects a single punctuation
+    // character, not the contiguous run.
     let mut ta = ta_with("hello... world");
     let area = Rect::new(0, 0, 40, 5);
     let state = TextAreaState::default();
 
-    // Double-click on "..." (col 6 = first '.')
+    // Double-click on the first "." (col 6)
     ta.handle_mouse(mouse_down(6, 0), area, state);
     let action = ta.handle_mouse(mouse_down(6, 0), area, state);
     assert_eq!(action, MouseAction::SelectionFinished);
     assert_eq!(
         ta.selected_text(),
-        Some("...".to_string()),
-        "double-click on punctuation should select the punctuation run"
+        Some(".".to_string()),
+        "double-click on punctuation should select one character"
     );
 }
 
