@@ -735,6 +735,128 @@ fn rewind_success_toasts_in_full_tui_and_commits_system_block_in_minimal() {
     assert_eq!(last_system_text(&app, id), "Reverted conversation");
 }
 
+// ---------------------------------------------------------------------------
+// Bug 1 (rewind target): the rewind KEYBINDING must always target the
+// LATEST prompt. Trusting the cursor-derived index mis-targets when the
+// cursor sits on earlier rounds, when the failed prompt rendered as an
+// interjection, or when its optimistic echo was retired after a send
+// failure — each case resolved to prompt 0 and wiped its tool calls
+// (ctx collapsed back to the pre-turn size).
+// ---------------------------------------------------------------------------
+
+/// The user's bug-1 scrollback: prompt0 followed by many tool-call
+/// rounds, then a failed "继续" rendered per `tail`.
+enum Bug1Tail {
+    /// "继续" sent after prompt0's turn had already ended.
+    DirectPrompt,
+    /// "继续" sent while prompt0's turn was still stuck (mid-turn
+    /// steer): rendered as an interjection with no prompt_index.
+    Interjection,
+    /// "继续"'s optimistic echo was retired on the send failure.
+    RetiredEcho,
+}
+
+fn bug1_app(tail: Bug1Tail) -> AppView {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.session.session_id = Some(acp::SessionId::new("sess".to_string()));
+        let mut p0 = UserPromptBlock::new("do a large task");
+        p0.prompt_index = Some(0);
+        agent.scrollback.push_block(RenderBlock::UserPrompt(p0));
+        for i in 0..50 {
+            agent
+                .scrollback
+                .push_block(RenderBlock::agent_message(format!("round {i}")));
+        }
+        match tail {
+            Bug1Tail::DirectPrompt => {
+                let mut p1 = UserPromptBlock::new("继续");
+                p1.prompt_index = Some(1);
+                agent.scrollback.push_block(RenderBlock::UserPrompt(p1));
+            }
+            Bug1Tail::Interjection => {
+                let mut mid = UserPromptBlock::new("继续");
+                mid.is_interjection = true;
+                agent.scrollback.push_block(RenderBlock::UserPrompt(mid));
+            }
+            Bug1Tail::RetiredEcho => {}
+        }
+        agent.scrollback.prepare_layout(80, 40);
+    }
+    app
+}
+
+/// The rewind keybinding targets the latest prompt (1), so only the
+/// failed "继续" turn is rewound and prompt0's 50 rounds survive —
+/// whatever the cursor sits on and however the failed prompt rendered.
+fn assert_keybinding_targets_latest(mut app: AppView, cursor: Option<usize>) {
+    let id = AgentId(0);
+    app.current_ui.confirm_before_rewind = Some(false);
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        let target = cursor.unwrap_or(agent.scrollback.len() - 1);
+        agent.scrollback.set_selected(Some(target));
+    }
+
+    dispatch(Action::Rewind, &mut app);
+    let effects = dispatch(
+        Action::TaskComplete(TaskResult::RewindPointsLoaded {
+            agent_id: id,
+            points: vec![rewind_point(1), rewind_point(0)],
+        }),
+        &mut app,
+    );
+    assert!(
+        matches!(
+            &effects[0],
+            Effect::RewindExecute {
+                target_prompt_index: 1,
+                ..
+            }
+        ),
+        "got {effects:?}"
+    );
+    assert!(matches!(
+        app.agents[&id].rewind_state.as_ref().unwrap().phase,
+        crate::views::rewind::RewindPhase::Executing {
+            target_prompt_index: 1
+        }
+    ));
+}
+
+#[test]
+fn bug1_rewind_keybinding_scrolled_up_targets_latest_prompt() {
+    // Cursor parked on one of prompt0's rounds (follow mode off).
+    let app = bug1_app(Bug1Tail::DirectPrompt);
+    assert_keybinding_targets_latest(app, Some(1));
+}
+
+#[test]
+fn bug1_rewind_keybinding_interjection_targets_latest_prompt() {
+    // "继续" was a mid-turn steer: an interjection, which the
+    // cursor-derived lookup skips (resolving to prompt 0).
+    let app = bug1_app(Bug1Tail::Interjection);
+    assert_keybinding_targets_latest(app, None);
+}
+
+#[test]
+fn bug1_rewind_keybinding_retired_echo_targets_latest_prompt() {
+    // "继续"'s optimistic echo is gone (retired on the send
+    // failure); the cursor-derived lookup falls back to prompt 0.
+    let app = bug1_app(Bug1Tail::RetiredEcho);
+    assert_keybinding_targets_latest(app, None);
+}
+
+#[test]
+fn bug1_rewind_keybinding_on_failed_prompt_targets_latest_prompt() {
+    // Control: the cursor sits on the failed "继续" itself — already
+    // resolved to prompt 1 before the fix, and still does.
+    let app = bug1_app(Bug1Tail::DirectPrompt);
+    assert_keybinding_targets_latest(app, None);
+}
+
 #[test]
 fn primary_path_returns_correct_idx_for_each_prompt() {
     let mut sb = ScrollbackState::new();

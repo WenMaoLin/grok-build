@@ -271,6 +271,7 @@ mod sync_rewind_anchor_to_picker_tests {
             anchor_entry_idx: 0,
             stashed_draft: None,
             selected_prompt_index: None,
+            selected_prompt_is_explicit: false,
         });
     }
     #[test]

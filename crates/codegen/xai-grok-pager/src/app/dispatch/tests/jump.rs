@@ -63,7 +63,7 @@ fn show_picker_refused_while_rewind_open() {
     let id = AgentId(0);
     push_turns(&mut app, id, 3);
     app.agents.get_mut(&id).unwrap().rewind_state = Some(
-        crate::views::rewind::RewindState::new_cancel_offer(0, None, None),
+        crate::views::rewind::RewindState::new_cancel_offer(0, None, None, false),
     );
 
     dispatch(Action::JumpShowPicker, &mut app);

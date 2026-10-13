@@ -83,6 +83,12 @@ pub struct RewindState {
     pub anchor_entry_idx: usize,
     pub stashed_draft: Option<StashedPrompt>,
     pub selected_prompt_index: Option<usize>,
+    /// How `selected_prompt_index` was chosen. `true` = an explicit
+    /// prompt selection (inline-edit submit); `false` = derived from
+    /// the cursor by the rewind keybinding, which targets the LATEST
+    /// prompt once the rewind points arrive (see
+    /// `handle_rewind_points_loaded`).
+    pub selected_prompt_is_explicit: bool,
 }
 
 impl RewindState {
@@ -90,12 +96,14 @@ impl RewindState {
         anchor: usize,
         draft: Option<StashedPrompt>,
         selected_prompt_index: Option<usize>,
+        selected_prompt_is_explicit: bool,
     ) -> Self {
         Self {
             phase: RewindPhase::CancelOffer { active_idx: 0 },
             anchor_entry_idx: anchor,
             stashed_draft: draft,
             selected_prompt_index,
+            selected_prompt_is_explicit,
         }
     }
 }
@@ -651,6 +659,7 @@ mod tests {
             anchor_entry_idx: 0,
             stashed_draft: None,
             selected_prompt_index: Some(3),
+            selected_prompt_is_explicit: true,
         }
     }
 
@@ -841,13 +850,14 @@ mod tests {
             anchor_entry_idx: 0,
             stashed_draft: None,
             selected_prompt_index: None,
+            selected_prompt_is_explicit: false,
         };
         assert!(matches!(
             handle_rewind_key(&s, &key(KeyCode::Esc)),
             RewindInput::Dismissed
         ));
 
-        let s = RewindState::new_cancel_offer(0, None, None);
+        let s = RewindState::new_cancel_offer(0, None, None, false);
         assert!(matches!(
             handle_rewind_key(&s, &key(KeyCode::Esc)),
             RewindInput::Dismissed
@@ -858,6 +868,7 @@ mod tests {
             anchor_entry_idx: 0,
             stashed_draft: None,
             selected_prompt_index: None,
+            selected_prompt_is_explicit: false,
         };
         assert!(matches!(
             handle_rewind_key(&s, &key(KeyCode::Esc)),

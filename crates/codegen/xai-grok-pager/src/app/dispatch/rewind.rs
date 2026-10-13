@@ -104,6 +104,7 @@ pub(super) fn dispatch_rewind(app: &mut AppView) -> Vec<Effect> {
             anchor,
             draft,
             selected_shell_idx,
+            false,
         ));
         return vec![];
     }
@@ -113,7 +114,13 @@ pub(super) fn dispatch_rewind(app: &mut AppView) -> Vec<Effect> {
         phase: RewindPhase::Loading,
         anchor_entry_idx: selected_idx.unwrap_or(0),
         stashed_draft: draft,
+        // Cursor-derived: the rewind keybinding is not bound to the
+        // cursor position. `handle_rewind_points_loaded` resolves the
+        // target to the LATEST prompt for this path, so a scrolled-up
+        // cursor (or a retired last-prompt echo) cannot drag the
+        // target back into earlier turns.
         selected_prompt_index: selected_shell_idx,
+        selected_prompt_is_explicit: false,
     });
 
     vec![Effect::FetchRewindPoints {
@@ -140,7 +147,7 @@ pub(super) fn dispatch_rewind_show_picker(app: &mut AppView) -> Vec<Effect> {
     if agent.session.state.is_busy() {
         let anchor = agent.scrollback.len().saturating_sub(1);
         let draft = stash_prompt(&mut agent.prompt);
-        agent.rewind_state = Some(RewindState::new_cancel_offer(anchor, draft, None));
+        agent.rewind_state = Some(RewindState::new_cancel_offer(anchor, draft, None, false));
         return vec![];
     }
 
@@ -150,6 +157,7 @@ pub(super) fn dispatch_rewind_show_picker(app: &mut AppView) -> Vec<Effect> {
         anchor_entry_idx: 0,
         stashed_draft: draft,
         selected_prompt_index: None,
+        selected_prompt_is_explicit: false,
     });
 
     vec![Effect::FetchRewindPoints {
@@ -211,12 +219,18 @@ pub(super) fn dispatch_rewind_cancel_offer(app: &mut AppView) -> Vec<Effect> {
         .rewind_state
         .as_ref()
         .and_then(|s| s.selected_prompt_index);
+    let selected_is_explicit = agent
+        .rewind_state
+        .as_ref()
+        .map(|s| s.selected_prompt_is_explicit)
+        .unwrap_or(false);
     let draft = agent.rewind_state.take().and_then(|s| s.stashed_draft);
     agent.rewind_state = Some(RewindState {
         phase: RewindPhase::Loading,
         anchor_entry_idx: anchor,
         stashed_draft: draft,
         selected_prompt_index: selected,
+        selected_prompt_is_explicit: selected_is_explicit,
     });
     vec![Effect::CancelTurnThenFetchRewindPoints {
         agent_id: id,
@@ -300,6 +314,7 @@ fn enter_executing(
         anchor_entry_idx: anchor,
         stashed_draft: draft,
         selected_prompt_index: None,
+        selected_prompt_is_explicit: false,
     });
     vec![Effect::RewindExecute {
         agent_id,
@@ -328,6 +343,7 @@ fn begin_rewind(
             anchor_entry_idx: anchor,
             stashed_draft: draft,
             selected_prompt_index: Some(target),
+            selected_prompt_is_explicit: true,
         });
         return vec![];
     }
@@ -356,6 +372,7 @@ pub(super) fn dispatch_rewind_success(
             anchor_entry_idx: anchor,
             stashed_draft: draft,
             selected_prompt_index: None,
+            selected_prompt_is_explicit: false,
         });
         return vec![];
     }
@@ -412,10 +429,23 @@ pub(super) fn handle_rewind_points_loaded(
     };
     agent.rewind_points = Some(points.clone());
 
-    let desired_target = agent
-        .rewind_state
-        .as_ref()
-        .and_then(|s| s.selected_prompt_index);
+    // Resolve the intended target. An inline-edit submit names its
+    // prompt explicitly and must hit exactly that prompt. The rewind
+    // KEYBINDING is not cursor-bound: it always undoes the LATEST
+    // prompt. Trusting the cursor-derived index here is the bug-1
+    // failure mode — a cursor parked on earlier rounds (the user
+    // scrolled up to inspect them), an interjection, or a last
+    // prompt whose echo was retired after a send failure, all drag
+    // the target back into earlier turns and wipe their tool calls
+    // (ctx collapses to the pre-turn size). A `None` target is the
+    // `/rewind` picker flow: the picker decides.
+    let desired_target = match agent.rewind_state.as_ref() {
+        Some(s) if s.selected_prompt_is_explicit => s.selected_prompt_index,
+        Some(s) if s.selected_prompt_index.is_some() => {
+            points.iter().map(|p| p.prompt_index).max()
+        }
+        _ => None,
+    };
     let stashed = agent.rewind_state.take().and_then(|s| s.stashed_draft);
 
     if points.is_empty() {
@@ -470,6 +500,7 @@ pub(super) fn handle_rewind_points_loaded(
         anchor_entry_idx: initial_anchor,
         stashed_draft: draft,
         selected_prompt_index: None,
+        selected_prompt_is_explicit: false,
     });
     agent.scrollback.scroll_to_entry_center(initial_anchor);
     vec![]
@@ -494,6 +525,121 @@ pub(super) fn handle_rewind_execute_failed(
         anchor_entry_idx: anchor,
         stashed_draft: draft,
         selected_prompt_index: None,
+        selected_prompt_is_explicit: false,
     });
     vec![]
+}
+
+#[cfg(test)]
+mod rewind_target_repro {
+    use super::*;
+    use crate::scrollback::blocks::UserPromptBlock;
+
+    fn user_prompt_pi(text: &str, pi: usize) -> RenderBlock {
+        let mut b = UserPromptBlock::new(text);
+        b.prompt_index = Some(pi);
+        RenderBlock::UserPrompt(b)
+    }
+
+    fn interjection(text: &str) -> RenderBlock {
+        let mut b = UserPromptBlock::new(text);
+        b.is_interjection = true;
+        RenderBlock::UserPrompt(b)
+    }
+
+    fn round(i: usize) -> RenderBlock {
+        RenderBlock::agent_message(format!("round {i}"))
+    }
+
+    enum ContinueKind {
+        /// 继续 sent after prompt0's turn had already ended.
+        Direct,
+        /// 继续 sent while prompt0's turn was still stuck on the
+        /// network (a mid-turn steer).
+        Interjection,
+        /// 继续's optimistic echo was retired on the send failure.
+        Absent,
+    }
+
+    /// The user's bug-1 scrollback: prompt0 ("do a large task")
+    /// followed by 50 tool-call rounds, then a failed "继续"
+    /// rendered per `continue_kind`.
+    fn scenario(continue_kind: ContinueKind) -> ScrollbackState {
+        let mut sb = ScrollbackState::new();
+        sb.push_block(user_prompt_pi("do a large task", 0));
+        for i in 0..50 {
+            sb.push_block(round(i));
+        }
+        match continue_kind {
+            ContinueKind::Direct => {
+                sb.push_block(user_prompt_pi("继续", 1));
+            }
+            ContinueKind::Interjection => {
+                sb.push_block(interjection("继续"));
+            }
+            ContinueKind::Absent => {}
+        }
+        sb
+    }
+
+    /// Control: cursor on the failed "继续" (a real direct prompt,
+    /// present at the bottom) resolves to prompt 1 — only the
+    /// failed turn is rewound, prompt0's 50 rounds survive.
+    #[test]
+    fn control_cursor_on_direct_continue_is_prompt1() {
+        let sb = scenario(ContinueKind::Direct);
+        let bottom = sb.len() - 1;
+        assert_eq!(shell_prompt_index_at(&sb, bottom), Some(1));
+    }
+
+    /// Reproduction (bug 1): "继续" was sent as an interjection
+    /// while prompt0's turn was still stuck. An interjection
+    /// carries no prompt_index and is skipped by
+    /// `shell_prompt_index_at`, so the bottom cursor resolves to
+    /// prompt 0. The rewind KEYBINDING no longer trusts this
+    /// value (`handle_rewind_points_loaded` targets the latest
+    /// prompt for that path); the picker and the inline-edit
+    /// flow still rely on the helper.
+    #[test]
+    fn repro_interjection_continue_resolves_to_prompt0() {
+        let sb = scenario(ContinueKind::Interjection);
+        let bottom = sb.len() - 1;
+        assert_eq!(
+            shell_prompt_index_at(&sb, bottom),
+            Some(0),
+            "cursor-derived lookup skips the interjection and falls back to prompt 0; the keybinding path must not trust it"
+        );
+    }
+
+    /// Reproduction (bug 1): the failed "继续" block is absent
+    /// (its optimistic echo was retired on the send failure). The
+    /// bottom cursor falls back to prompt0's last round. The
+    /// rewind keybinding must not trust that fallback (see
+    /// `handle_rewind_points_loaded`).
+    #[test]
+    fn repro_absent_continue_falls_back_to_prompt0() {
+        let sb = scenario(ContinueKind::Absent);
+        let bottom = sb.len() - 1;
+        assert_eq!(
+            shell_prompt_index_at(&sb, bottom),
+            Some(0),
+            "cursor-derived lookup falls back to prompt 0; the keybinding path must not trust it"
+        );
+    }
+
+    /// Reproduction (bug 1): the user scrolled up to inspect
+    /// prompt0's 50 rounds (follow mode off). The cursor sits on
+    /// a prompt0 round, so the cursor-derived lookup resolves to
+    /// prompt 0. The rewind keybinding must not trust it (see
+    /// `handle_rewind_points_loaded`).
+    #[test]
+    fn repro_cursor_on_prior_rounds_resolves_to_prompt0() {
+        let sb = scenario(ContinueKind::Direct);
+        let on_prompt0_round = 1;
+        assert_eq!(
+            shell_prompt_index_at(&sb, on_prompt0_round),
+            Some(0),
+            "cursor-derived lookup resolves to prompt 0; the keybinding path must not trust it"
+        );
+    }
 }
