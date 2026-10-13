@@ -66,6 +66,7 @@ pub(crate) static TASK_BACKGROUNDED: LazyLock<String> = LazyLock::new(|| {
         output_file: String::new(),
         monitor_description: None,
         description: None,
+        started_at_ms: None,
     })
 });
 

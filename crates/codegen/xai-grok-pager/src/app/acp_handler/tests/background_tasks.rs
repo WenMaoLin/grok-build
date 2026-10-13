@@ -18,6 +18,7 @@
             output_file: "/tmp/mon-1.log".into(),
             monitor_description: Some("errors in deploy.log".into()),
             description: None,
+            started_at_ms: None,
         };
         handle(
             make_ext_session_notification_with_method("sess-1", "x.ai/session/update", update),
@@ -164,6 +165,7 @@
                 output_file: "/tmp/output.log".into(),
                 monitor_description: None,
                 description: Some("Wait a while".into()),
+                started_at_ms: None,
             },
             meta: None,
         };
@@ -216,6 +218,7 @@
                 output_file: "/tmp/output.log".into(),
                 monitor_description: None,
                 description: Some("   ".into()),
+                started_at_ms: None,
             },
             meta: None,
         };
@@ -712,6 +715,7 @@
                 output_file: "/tmp/output.log".into(),
                 monitor_description: None,
                 description: Some("wait for build".into()),
+                started_at_ms: None,
             },
             meta: None,
         };

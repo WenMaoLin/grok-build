@@ -183,6 +183,12 @@ pub struct TerminalRunResult {
     /// auto-background on timeout: the resulting `BackgroundTaskStarted` can carry the real PID instead of a placeholder. `None` for backends that
     /// cannot surface a local PID (e.g. ACP/remote terminals) or when the process exited before `child.id()` could be queried.
     pub pid: Option<u32>,
+    /// Wall-clock start time of the process, in unix milliseconds.
+    /// `None` when the backend cannot surface it (e.g. ACP/remote
+    /// terminals). Lets the pager render a backgrounded task's true
+    /// start time instead of the moment the `TaskBackgrounded`
+    /// notification arrived.
+    pub started_at_ms: Option<i64>,
 }
 
 /// Returned by `TerminalBackend::run_background` — gives the caller the task_id
@@ -194,6 +200,18 @@ pub struct BackgroundHandle {
     /// local PID (e.g. ACP/remote gateways) or when the process exited before the PID could be
     /// captured.
     pub pid: Option<u32>,
+    /// Wall-clock start time of the task, in unix milliseconds.
+    /// `None` when the backend cannot surface it.
+    pub started_at_ms: Option<i64>,
+}
+
+/// Convert a wall-clock [`std::time::SystemTime`] to unix
+/// milliseconds. `None` for times before the epoch, which should
+/// never occur for task start times.
+pub fn system_time_to_ms(time: std::time::SystemTime) -> Option<i64> {
+    time.duration_since(std::time::SystemTime::UNIX_EPOCH)
+        .ok()
+        .map(|elapsed| elapsed.as_millis() as i64)
 }
 
 /// The `signal` of a task that was lost, not failed. The pager finalizes it without a failed block

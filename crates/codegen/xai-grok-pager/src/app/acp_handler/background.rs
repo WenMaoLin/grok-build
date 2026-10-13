@@ -66,27 +66,38 @@ pub(super) fn handle_task_backgrounded(notif: &acp::ExtNotification, app: &mut A
         return false;
     };
 
-    let (tool_call_id, task_id, command, cwd, output_file, monitor_description, notif_description) =
-        match session_notif.update {
-            XaiSessionUpdate::TaskBackgrounded {
-                tool_call_id,
-                task_id,
-                command,
-                cwd,
-                output_file,
-                monitor_description,
-                description,
-            } => (
-                tool_call_id,
-                task_id,
-                command,
-                cwd,
-                output_file,
-                monitor_description,
-                description,
-            ),
-            _ => return false,
-        };
+    // Extract TaskBackgrounded fields
+    let (
+        tool_call_id,
+        task_id,
+        command,
+        cwd,
+        output_file,
+        monitor_description,
+        notif_description,
+        started_at_ms,
+    ) = match session_notif.update {
+        XaiSessionUpdate::TaskBackgrounded {
+            tool_call_id,
+            task_id,
+            command,
+            cwd,
+            output_file,
+            monitor_description,
+            description,
+            started_at_ms,
+        } => (
+            tool_call_id,
+            task_id,
+            command,
+            cwd,
+            output_file,
+            monitor_description,
+            description,
+            started_at_ms,
+        ),
+        _ => return false,
+    };
 
     // Replayed (`session/load`) restores are historical context, not new activity: mark them so the tasks pane doesn't auto-open on resume
     let meta = NotificationMeta::from_json(session_notif.meta.as_ref().and_then(|v| v.as_object()));
@@ -152,7 +163,16 @@ pub(super) fn handle_task_backgrounded(notif: &acp::ExtNotification, app: &mut A
         cwd,
         output_file,
         status: BgTaskStatus::Running,
-        start_time: std::time::SystemTime::now(),
+        // Anchor the row at the task's real start time when the
+        // shell reports it; fall back to the notification arrival
+        // time on legacy payloads.
+        start_time: started_at_ms
+            .filter(|ms| *ms > 0)
+            .and_then(|ms| {
+                std::time::SystemTime::UNIX_EPOCH
+                    .checked_add(std::time::Duration::from_millis(ms as u64))
+            })
+            .unwrap_or_else(std::time::SystemTime::now),
         end_time: None,
         exit_code: None,
         signal: None,

@@ -133,6 +133,15 @@ pub struct BashExecutionBackgrounded {
         serde(default, skip_serializing_if = "Option::is_none")
     )]
     pub description: Option<String>,
+    /// Wall-clock start time of the backgrounded task, in unix
+    /// milliseconds. `None` on legacy paths that cannot surface it.
+    /// Lets the pager render the task's true start time instead
+    /// of the moment this notification arrived.
+    #[cfg_attr(
+        feature = "serde",
+        serde(default, skip_serializing_if = "Option::is_none")
+    )]
+    pub started_at_ms: Option<i64>,
 }
 
 /// Notification that a bash command failed to execute.

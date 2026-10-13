@@ -331,6 +331,7 @@ async fn handle_notification(
                     output_file: bg.output_file.to_string_lossy().to_string(),
                     monitor_description: bg.monitor_description.clone(),
                     description: bg.description.clone(),
+                    started_at_ms: bg.started_at_ms,
                 },
                 meta: None,
             };

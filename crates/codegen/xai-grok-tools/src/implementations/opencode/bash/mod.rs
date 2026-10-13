@@ -501,6 +501,7 @@ mod tests {
                     output_file: PathBuf::from("/tmp/test.log"),
                     total_bytes: output.len(),
                     pid: None,
+                    started_at_ms: None,
                 }),
             }
         }
@@ -516,6 +517,7 @@ mod tests {
                     output_file: PathBuf::from("/tmp/test.log"),
                     total_bytes: output.len(),
                     pid: None,
+                    started_at_ms: None,
                 }),
             }
         }
@@ -767,6 +769,7 @@ mod tests {
                 output_file: PathBuf::from("/tmp/test.log"),
                 total_bytes: 100_000,
                 pid: None,
+                started_at_ms: None,
             }),
         };
         let resources = make_resources(mock);
@@ -801,6 +804,7 @@ mod tests {
                 output_file: PathBuf::from("/tmp/test.log"),
                 total_bytes: 0,
                 pid: None,
+                started_at_ms: None,
             }),
         };
         let resources = make_resources(mock);
@@ -1044,6 +1048,7 @@ mod tests {
                     output_file: PathBuf::from("/tmp/test.log"),
                     total_bytes: 2,
                     pid: None,
+                    started_at_ms: None,
                 })
             }
 

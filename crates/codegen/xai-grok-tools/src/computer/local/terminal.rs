@@ -19,7 +19,7 @@ use crate::computer::local::cgroup::{
 use crate::computer::task_log;
 use crate::computer::types::{
     BackgroundHandle, BackgroundedForeground, ComputerError, KillOutcome, KillSource, TaskSnapshot,
-    TerminalBackend, TerminalRunRequest, TerminalRunResult,
+    TerminalBackend, TerminalRunRequest, TerminalRunResult, system_time_to_ms,
 };
 use crate::notification::types::{BashNotificationBase, BashOutputChunk, ToolNotificationHandle};
 use crate::util::truncate::FRONT_BACK_TRUNCATION_MARKER;
@@ -376,6 +376,7 @@ impl ProcessState {
             output_file: self.output_file.clone(),
             total_bytes: self.total_bytes,
             pid: self.child.id(),
+            started_at_ms: system_time_to_ms(self.start_wall_time),
         }
     }
 
@@ -1433,12 +1434,14 @@ impl LocalTerminalActor {
         if let Some(pid) = pid {
             self.child_exit.watch(pid);
         }
+        let started_at_ms = system_time_to_ms(process_state.start_wall_time);
         self.processes.insert(task_id.clone(), process_state);
 
         let _ = reply.send(Ok(BackgroundHandle {
             task_id,
             output_file: request.output_file,
             pid,
+            started_at_ms,
         }));
     }
 
@@ -2144,6 +2147,7 @@ impl LocalTerminalActor {
                 task_id: process.tool_call_id.clone(),
                 monitor_description: None,
                 description: process.description.clone().filter(|d| !d.trim().is_empty()),
+                started_at_ms: system_time_to_ms(process.start_wall_time),
             },
         );
     }
@@ -2305,6 +2309,7 @@ impl LocalTerminalActor {
                     task_id: task_id.clone(),
                     monitor_description: recovered_monitor_description,
                     description: effective_description.clone(),
+                    started_at_ms: system_time_to_ms(process.start_wall_time),
                 });
 
                 // The old monitor pipeline died with the child session; re-spawn it.

@@ -2073,6 +2073,7 @@ impl xai_tool_runtime::Tool for BashTool {
                 task_id: task_id.clone(),
                 monitor_description: None,
                 description: Some(input.description.clone()).filter(|d| !d.trim().is_empty()),
+                started_at_ms: handle.started_at_ms,
             });
 
             let retrieval_hint = Self::background_retrieval_hint(&resources, &task_id).await?;
@@ -2161,6 +2162,7 @@ impl xai_tool_runtime::Tool for BashTool {
                     task_id: tool_call_id.as_str().to_owned(),
                     monitor_description: None,
                     description: Some(input.description.clone()).filter(|d| !d.trim().is_empty()),
+                    started_at_ms: result.started_at_ms,
                 });
 
                 let retrieval_hint =
@@ -2450,6 +2452,7 @@ mod tests {
                     output_file: PathBuf::from("/tmp/test.log"),
                     total_bytes: output.len(),
                     pid: None,
+                    started_at_ms: None,
                 }),
                 bg_task_id: "task-1".to_string(),
                 bg_output_file: PathBuf::from("/tmp/bg.log"),
@@ -2470,6 +2473,7 @@ mod tests {
                     output_file: PathBuf::from("/tmp/test.log"),
                     total_bytes: output.len(),
                     pid: None,
+                    started_at_ms: None,
                 }),
                 bg_task_id: "task-1".to_string(),
                 bg_output_file: PathBuf::from("/tmp/bg.log"),
@@ -2501,6 +2505,7 @@ mod tests {
                     output_file: PathBuf::new(),
                     total_bytes: 0,
                     pid: None,
+                    started_at_ms: None,
                 }),
                 bg_task_id: task_id.to_string(),
                 bg_output_file: PathBuf::from(format!("/tmp/{}.log", task_id)),
@@ -2547,6 +2552,7 @@ mod tests {
                 task_id: self.bg_task_id.clone(),
                 output_file: self.bg_output_file.clone(),
                 pid: None,
+                started_at_ms: None,
             })
         }
 

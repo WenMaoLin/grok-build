@@ -866,6 +866,12 @@ pub enum SessionUpdate {
         /// The pager prefers it over the raw `command` in its "Task started" line and tasks pane. `None` when omitted.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         description: Option<String>,
+        /// Wall-clock start time of the backgrounded task, in unix
+        /// milliseconds. `None` on legacy payloads. Lets the pager
+        /// render the task's true start time instead of the moment
+        /// this notification arrived.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        started_at_ms: Option<i64>,
     },
     /// Last-wins full list for this session's backgrounded tasks.
     ///

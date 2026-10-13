@@ -1876,6 +1876,7 @@ pub(super) fn make_task_backgrounded_notif(
             output_file: "/tmp/output.log".into(),
             monitor_description: None,
             description: None,
+            started_at_ms: None,
         },
         meta: None,
     };
@@ -1899,6 +1900,7 @@ pub(super) fn make_replayed_task_backgrounded_notif(
             output_file: "/tmp/output.log".into(),
             monitor_description: None,
             description: None,
+            started_at_ms: None,
         },
         meta: Some(crate::acp::meta::ReplayMetaStamp::replayed()),
     };

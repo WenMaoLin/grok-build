@@ -11,7 +11,7 @@ use agent_client_protocol as acp;
 use xai_acp_lib::{AcpAgentGatewaySender as GatewaySender, acp_channel_failure};
 use xai_grok_tools::computer::types::{
     BackgroundHandle, ComputerError, KillOutcome, KillSource, TaskKind, TaskSnapshot,
-    TerminalBackend, TerminalRunRequest, TerminalRunResult,
+    TerminalBackend, TerminalRunRequest, TerminalRunResult, system_time_to_ms,
 };
 
 /// A snapshot's per-completion fields, grouped to avoid transposed positional args.
@@ -268,6 +268,7 @@ impl AcpTerminalAdapter {
                 output_file: request.output_file,
                 total_bytes,
                 pid: None,
+                started_at_ms: system_time_to_ms(started_at),
             };
         }
 
@@ -317,6 +318,7 @@ impl AcpTerminalAdapter {
             output_file: request.output_file,
             total_bytes,
             pid: None,
+            started_at_ms: system_time_to_ms(started_at),
         }
     }
 
@@ -419,6 +421,7 @@ impl TerminalBackend for AcpTerminalAdapter {
             output_file: request.output_file,
             total_bytes,
             pid: None,
+            started_at_ms: None,
         })
     }
 
@@ -435,6 +438,7 @@ impl TerminalBackend for AcpTerminalAdapter {
         let create_res = self.create_terminal(command.clone(), &request).await?;
         let task_id = create_res.terminal_id.0.to_string();
         let description = request.description;
+        let task_started_at = std::time::SystemTime::now();
 
         {
             let mut tasks = self.tasks.lock().unwrap();
@@ -449,6 +453,7 @@ impl TerminalBackend for AcpTerminalAdapter {
                     owner_session_id: request.owner_session_id.clone(),
                     description,
                     output_byte_limit: request.output_byte_limit,
+                    start_time: task_started_at,
                     ..Default::default()
                 },
             );
@@ -470,6 +475,7 @@ impl TerminalBackend for AcpTerminalAdapter {
             task_id,
             output_file,
             pid: None,
+            started_at_ms: system_time_to_ms(task_started_at),
         })
     }
 

@@ -1119,6 +1119,7 @@ async fn task_backgrounded_persisted_line_is_stamped() {
             task_id: "task-bg".into(),
             monitor_description: None,
             description: None,
+            started_at_ms: None,
         },
     );
     let mut offsets = HashMap::new();
@@ -1150,6 +1151,7 @@ async fn task_backgrounded_requests_background_tasks_snapshot() {
             task_id: "task-bg-list".into(),
             monitor_description: None,
             description: None,
+            started_at_ms: None,
         },
     );
     let mut offsets = HashMap::new();
@@ -1246,6 +1248,7 @@ fn backgrounded_notification(task_id: &str) -> ToolNotification {
             task_id: task_id.into(),
             monitor_description: None,
             description: None,
+            started_at_ms: None,
         },
     )
 }
@@ -2107,6 +2110,7 @@ async fn request_background_tasks_snapshot_skipped_when_emit_local_disabled() {
             task_id: "task-bg-skip".into(),
             monitor_description: None,
             description: None,
+            started_at_ms: None,
         },
     );
     let mut offsets = HashMap::new();

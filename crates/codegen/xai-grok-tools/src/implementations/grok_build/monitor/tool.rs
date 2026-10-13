@@ -160,6 +160,7 @@ impl xai_tool_runtime::Tool for MonitorTool {
             task_id: task_id.clone(),
             monitor_description: tray_description.clone(),
             description: tray_description,
+            started_at_ms: bg_handle.started_at_ms,
         });
 
         // Spawn the stdout processing pipeline.
