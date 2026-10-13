@@ -46,6 +46,7 @@ async fn newer_junk_does_not_consume_the_cap() {
 }
 
 #[tokio::test]
+#[cfg(unix)] // Symlink creation on Windows needs privileges/developer mode.
 async fn keeps_only_regular_files_inside_the_assets_dir() {
     let assets = tempfile::tempdir().unwrap();
     let elsewhere = tempfile::tempdir().unwrap();

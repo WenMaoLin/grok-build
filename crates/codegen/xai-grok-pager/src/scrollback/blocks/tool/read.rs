@@ -624,7 +624,11 @@ mod tests {
         ctx.cwd = Some(std::path::PathBuf::from("/Users/me/project"));
         let output = block.output(&ctx);
         let header = first_line(&output);
-        assert_eq!(derive_selection_text(header), "src/main.rs");
+        let expected = std::path::Path::new("src")
+            .join("main.rs")
+            .to_string_lossy()
+            .into_owned();
+        assert_eq!(derive_selection_text(header), expected);
     }
 
     #[test]
