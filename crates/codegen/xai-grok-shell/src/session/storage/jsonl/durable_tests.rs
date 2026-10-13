@@ -464,3 +464,54 @@ async fn init_session_skips_parent_sync_on_a_populated_resume() {
 fn darwin_fullfsync_seam_reports_invalid_descriptor() {
     assert!(super::super::fullfsync_raw(-1).is_err());
 }
+
+/// Opening a session appends a `background_tasks` state snapshot (the shell
+/// emits one whenever a session becomes resident). That is not user activity:
+/// it must not refresh the summary's `last_active_at`, or the dashboard and
+/// session list show "now" for a session the user only looked at.
+#[tokio::test]
+async fn background_tasks_snapshot_does_not_record_activity() {
+    fn last_active(dir: &Path) -> Option<chrono::DateTime<chrono::Utc>> {
+        let bytes = std::fs::read(dir.join("summary.json")).unwrap();
+        serde_json::from_slice::<crate::session::persistence::Summary>(&bytes)
+            .unwrap()
+            .last_active_at
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    let info = info();
+    let adapter = JsonlStorageAdapter::with_explicit_session_dir(dir.path().to_path_buf());
+    adapter
+        .init_session(&info, default_model_id())
+        .await
+        .unwrap();
+
+    // Control: an ordinary update records activity.
+    adapter
+        .append_update(&info, &update(&info, "hello".into()))
+        .await
+        .unwrap();
+    let after_activity = last_active(dir.path());
+    assert!(
+        after_activity.is_some(),
+        "an ordinary update records activity"
+    );
+
+    let snapshot = SessionUpdate::Xai(Box::new(
+        crate::extensions::notification::SessionNotification {
+            session_id: info.id.clone(),
+            update: crate::extensions::notification::SessionUpdate::BackgroundTasks {
+                tasks: Vec::new(),
+                truncated: false,
+            },
+            meta: None,
+        },
+    ));
+    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    adapter.append_update(&info, &snapshot).await.unwrap();
+    assert_eq!(
+        last_active(dir.path()),
+        after_activity,
+        "a background_tasks snapshot must not bump last_active_at"
+    );
+}

@@ -8112,6 +8112,83 @@ fn dashboard_attach_build_roster_row_keeps_disk_resume() {
         "expected Build disk resume with roster cwd, got {effects:?}"
     );
 }
+
+/// Regression (bug 2): clicking a dormant roster row loads it as a live agent.
+/// The new agent's `last_active_at` must be re-anchored to the roster's real
+/// last-change time, so the row keeps its timestamp and position instead of
+/// jumping into the "Idle" group with a "now" timestamp.
+///
+/// The load-completion pseudo-turn-end (`mark_turn_finished(TurnEnd::Aborted)`
+/// in `handle_session_loaded`) must NOT overwrite that anchor — it did, which
+/// made the row show "now" again the moment the replay finished.
+#[serial_test::serial(GROK_AGENT_DASHBOARD)]
+#[test]
+fn dashboard_attach_roster_row_reanchors_last_active_at_to_roster_time() {
+    let mut app = test_app();
+    app.leader_mode = true;
+    let mut entry = idle_roster_entry("dormant-dash-1", "Old session");
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+    entry.last_change_unix_ms = now_ms - 30 * 60 * 1000;
+    app.leader_roster = vec![entry];
+    let effects = dispatch_dashboard_attach(
+        &mut app,
+        crate::views::dashboard::DashboardRowId::Roster {
+            session_id: "dormant-dash-1".into(),
+        },
+    );
+    let new_id = effects
+        .iter()
+        .find_map(|effect| match effect {
+            Effect::LoadSession { agent_id, .. } => Some(*agent_id),
+            _ => None,
+        })
+        .expect("roster attach must produce a LoadSession");
+    let anchor = app.agents[&new_id]
+        .last_active_at
+        .expect("placeholder carries an anchor");
+    assert!(
+        anchor.elapsed().as_secs() >= 25 * 60,
+        "opening a dormant session must re-anchor last_active_at to the roster's \
+         last-change time (~30min ago), got {:?} — the row would show 'now'",
+        anchor.elapsed()
+    );
+
+    // The replay finishing must not count as user activity.
+    dispatch(
+        Action::TaskComplete(TaskResult::SessionLoaded {
+            agent_id: new_id,
+            session_id: acp::SessionId::new("dormant-dash-1"),
+            models: None,
+            modes: None,
+            code_restored: false,
+            restore_summary: None,
+            restore_degree: None,
+            running_prompt_id: None,
+        }),
+        &mut app,
+    );
+    let agent = &app.agents[&new_id];
+    assert!(
+        agent.last_active_at.unwrap().elapsed().as_secs() >= 25 * 60,
+        "the load-completion pseudo-turn-end must not restamp last_active_at; \
+         got {:?} — the row would show 'now' after the replay",
+        agent.last_active_at.unwrap().elapsed()
+    );
+    let row_time = crate::views::dashboard::row::top_level_last_change_at(
+        agent,
+        crate::views::dashboard::classify_top_level(agent),
+    );
+    let age = std::time::SystemTime::now()
+        .duration_since(row_time)
+        .unwrap_or_default();
+    assert!(
+        age.as_secs() >= 25 * 60,
+        "the rendered row must show the session's real age (~30min), got {age:?}"
+    );
+}
 /// The allocation-free readiness predicate must agree with the owned plan a stop would build, in every state that flips it.
 #[test]
 fn stop_readiness_predicate_matches_the_built_plan() {

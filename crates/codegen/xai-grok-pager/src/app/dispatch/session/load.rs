@@ -80,6 +80,59 @@ pub(in crate::app::dispatch) fn clear_stale_session_id(
     }
     sid
 }
+
+/// The wall-clock anchor a session's dashboard row keeps until the user
+/// actually interacts with it: the roster's real last-change time.
+fn roster_activity_anchor(app: &AppView, session_id: &str) -> Option<std::time::Instant> {
+    app.dashboard_roster()
+        .iter()
+        .find(|entry| entry.session_id == session_id)
+        .map(|entry| entry.last_change_unix_ms)
+        .and_then(unix_ms_to_instant)
+}
+
+/// Re-anchor a freshly created replay placeholder's `last_active_at`
+/// to the roster's real last-change time.
+///
+/// `AgentView::new` stamps `last_active_at = Instant::now()`, and the
+/// dashboard renders and sorts rows from that anchor: merely opening a
+/// dormant session bumps it to the top of the list with a "now"
+/// timestamp. The user expects the row to keep its true position and
+/// timestamp until they actually reply to the session. Returns `true`
+/// when the anchor was re-based.
+fn reanchor_placeholder_to_roster(
+    app: &mut AppView,
+    agent_id: AgentId,
+    session_id: &str,
+) -> bool {
+    let Some(instant) = roster_activity_anchor(app, session_id) else {
+        return false;
+    };
+    let Some(agent) = app.agents.get_mut(&agent_id) else {
+        return false;
+    };
+    agent.last_active_at = Some(instant);
+    true
+}
+
+/// Convert a roster unix-ms timestamp to an [`std::time::Instant`]
+/// relative to now.
+///
+/// `None` for non-positive or future timestamps — the roster defaults
+/// missing `last_change_unix_ms` to 0, and an anchor in the future
+/// would sort the row above every other one.
+fn unix_ms_to_instant(ms: i64) -> Option<std::time::Instant> {
+    if ms <= 0 {
+        return None;
+    }
+    let system = std::time::SystemTime::UNIX_EPOCH
+        .checked_add(std::time::Duration::from_millis(ms as u64))?;
+    let elapsed = std::time::SystemTime::now()
+        .duration_since(system)
+        .ok()?;
+    std::time::Instant::now().checked_sub(elapsed)
+}
+/// If a local agent already owns this id **and** matches kind, focus it.
 pub(in crate::app::dispatch) fn focus_if_session_already_open(
     app: &mut AppView,
     session_id: &str,
@@ -225,6 +278,7 @@ fn dispatch_load_session_ungated(
     );
     app.agents.insert(agent_id, agent);
     identity_rebind.apply(app);
+    reanchor_placeholder_to_roster(app, agent_id, &session_id);
     let conversation_entry = session_opens_as_chat(app, chat_kind);
     let agent_mut = app.agents.get_mut(&agent_id).unwrap();
     agent_mut.attached_as_viewer = true;
@@ -1152,6 +1206,7 @@ pub(in crate::app::dispatch) fn dispatch_load_session_with_restore(
         scrollback,
     );
     app.agents.insert(agent_id, agent);
+    reanchor_placeholder_to_roster(app, agent_id, &session_id);
     let conversation_entry = session_opens_as_chat(app, false);
     {
         let agent = app.agents.get_mut(&agent_id).unwrap();
@@ -1237,6 +1292,10 @@ pub(in crate::app::dispatch) fn handle_session_loaded(
     }
     let identity_rebind = super::super::dashboard::WorkspaceIdentityRebind::capture(app);
     crate::app::workspace_sync::allow_loaded_session(app, session_id.0.as_ref());
+    // Loading a session is not user activity: the pseudo-turn-end below must
+    // not stamp `last_active_at` with `now`, or the dashboard row jumps to the
+    // top of the Idle group with a fresh timestamp just from being opened.
+    let activity_anchor = roster_activity_anchor(app, session_id.0.as_ref());
     if let Some(agent) = app.agents.get_mut(&agent_id) {
         let hydrate_sid = session_id.clone();
         agent.bind_session_id(session_id);
@@ -1246,6 +1305,9 @@ pub(in crate::app::dispatch) fn handle_session_loaded(
         agent.session.restore_degree = restore_degree;
         agent.session.finish_turn(&mut agent.scrollback);
         agent.mark_turn_finished(TurnEnd::Aborted);
+        if let Some(anchor) = activity_anchor {
+            agent.last_active_at = Some(anchor);
+        }
         if let Some(placeholder_id) = agent.loading_placeholder_id.take() {
             agent.scrollback.remove_entry(placeholder_id);
         }
@@ -1375,6 +1437,9 @@ pub(in crate::app::dispatch) fn handle_session_load_failed(
     error: String,
 ) -> Vec<Effect> {
     tracing::error!(agent = ?agent_id, session = ?session_id, error = %error, "Session load failed");
+    // A failed load is not user activity either: keep the row anchored to the
+    // session's real last-change time instead of stamping `now`.
+    let activity_anchor = roster_activity_anchor(app, session_id.0.as_ref());
     if let Some(agent) = app.agents.get_mut(&agent_id) {
         if defer_to_open_reload_window(agent, agent_id, "SessionLoadFailed") {
             return vec![];
@@ -1383,6 +1448,9 @@ pub(in crate::app::dispatch) fn handle_session_load_failed(
         agent.session.prompt_history_loading = false;
         agent.session.finish_command();
         agent.mark_turn_finished(TurnEnd::Aborted);
+        if let Some(anchor) = activity_anchor {
+            agent.last_active_at = Some(anchor);
+        }
         agent.scrollback.end_batch();
         agent.session.loading_replay = false;
         agent.pending_first_prompt = None;

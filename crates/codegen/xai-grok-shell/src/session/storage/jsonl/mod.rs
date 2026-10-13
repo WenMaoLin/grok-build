@@ -680,13 +680,28 @@ impl JsonlStorageAdapter {
         self.apply_summary_patch(
             info,
             super::summary_write::SummaryPatch {
-                record_activity: true,
+                record_activity: !Self::is_background_tasks_snapshot(update),
                 messages: Some(super::summary_write::CounterOp::Increment(1)),
                 ..Default::default()
             },
         )
         .await
         .map_err(super::AppendUpdateError::Committed)
+    }
+
+    /// A `background_tasks` snapshot is derived state: the shell emits one
+    /// whenever a session becomes resident, i.e. on every open. It must not
+    /// count as user activity — otherwise merely opening a session refreshes
+    /// its `last_active_at`, and the dashboard / session list shows "now"
+    /// for a session the user only looked at.
+    fn is_background_tasks_snapshot(update: &super::SessionUpdate) -> bool {
+        matches!(
+            update,
+            super::SessionUpdate::Xai(n) if matches!(
+                n.update,
+                crate::extensions::notification::SessionUpdate::BackgroundTasks { .. }
+            )
+        )
     }
     /// The borrowing envelope and `&RawValue` avoid an intermediate `Value` allocation.
     /// Corruption-tolerant like [`Self::read_chat_history_sync`]: a torn line (crashed or racing append) is skipped with a warning.
